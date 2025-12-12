@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Map Distance Tool</title>
+<style>
+    body { font-family: sans-serif; margin: 0; overflow: hidden; }
+    #topbar { background: #eee; padding: 10px; }
+    #canvas { 
+        display: block; 
+        margin: 0 auto; 
+        border: 1px solid #444; 
+        cursor: crosshair;
+        background: #000;
+    }
+    #info { padding: 10px; }
+</style>
+</head>
+<body>
+
+<div id="topbar">
+    <input type="file" id="fileInput" accept="image/*">
+    <span style="margin-left: 20px;">Scroll to zoom. Click two points to measure. Right click to clear points.</span>
+</div>
+
+<canvas id="canvas"></canvas>
+<div id="info"></div>
+
+<script>
+// Earth radius
+const R = 6371.0088; // km
+
+// Canvas & elements
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d", { alpha: false });
+const fileInput = document.getElementById("fileInput");
+const info = document.getElementById("info");
+
+// Resize canvas to fit window while leaving a margin
+function fitCanvas() {
+    canvas.width = window.innerWidth - 40;
+    canvas.height = window.innerHeight - 120;
+}
+fitCanvas();
+window.addEventListener("resize", fitCanvas);
+
+let img = new Image();
+let imgLoaded = false;
+
+// Camera parameters for zoom & pan
+let scale = 1.0;
+let originX = 0;
+let originY = 0;
+
+let clickPoints = [];
+
+// Convert screen pixel → image pixel
+function screenToImageCoords(screenX, screenY) {
+    const imgX = (screenX - originX) / scale;
+    const imgY = (screenY - originY) / scale;
+    return { x: imgX, y: imgY };
+}
+
+// Convert image pixel → lat/lon (equirectangular)
+function pixelToLatLon(x, y, W, H) {
+    const lon = (x / W) * 360.0 - 180.0;
+    const lat = 90.0 - (y / H) * 180.0;
+    return { lat, lon };
+}
+
+// Haversine great-circle distance
+function haversine(lat1, lon1, lat2, lon2) {
+    const toRad = Math.PI / 180;
+    const φ1 = lat1 * toRad;
+    const φ2 = lat2 * toRad;
+    const Δφ = (lat2 - lat1) * toRad;
+    let Δλ = (lon2 - lon1) * toRad;
+
+    // Normalize longitude wrap
+    if (Δλ > Math.PI) Δλ -= 2 * Math.PI;
+    if (Δλ < -Math.PI) Δλ += 2 * Math.PI;
+
+    const a = Math.sin(Δφ/2)**2 +
+              Math.cos(φ1)*Math.cos(φ2) *
+              Math.sin(Δλ/2)**2;
+
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    return R * c;
+}
+
+// Draw the scene
+function draw() {
+    if (!imgLoaded) return;
+
+    ctx.setTransform(scale, 0, 0, scale, originX, originY);
+    ctx.clearRect(-originX/scale, -originY/scale, canvas.width/scale, canvas.height/scale);
+
+    ctx.drawImage(img, 0, 0);
+
+    // Draw selected points if any
+    ctx.fillStyle = "red";
+    ctx.strokeStyle = "red";
+    ctx.lineWidth = 2 / scale;
+
+    if (clickPoints.length > 0) {
+        const p1 = clickPoints[0];
+        ctx.beginPath();
+        ctx.arc(p1.x, p1.y, 5/scale, 0, Math.PI*2);
+        ctx.fill();
+    }
+    if (clickPoints.length > 1) {
+        const p1 = clickPoints[0];
+        const p2 = clickPoints[1];
+
+        ctx.beginPath();
+        ctx.arc(p2.x, p2.y, 5/scale, 0, Math.PI*2);
+        ctx.fill();
+
+        ctx.beginPath();
+        ctx.moveTo(p1.x, p1.y);
+        ctx.lineTo(p2.x, p2.y);
+        ctx.stroke();
+    }
+}
+
+// Handle image load
+fileInput.addEventListener("change", e => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    img.src = URL.createObjectURL(file);
+    img.onload = () => {
+        imgLoaded = true;
+        clickPoints = [];
+        scale = Math.min(canvas.width / img.width, canvas.height / img.height);
+        originX = (canvas.width - img.width * scale) / 2;
+        originY = (canvas.height - img.height * scale) / 2;
+        draw();
+        info.innerHTML = "Image loaded. Click two points to measure distance.";
+    };
+});
+
+// Disable context menu on the canvas
+canvas.addEventListener("contextmenu", e => {e.preventDefault()});
+
+// Zooming
+canvas.addEventListener("wheel", e => {
+    if (!imgLoaded) return;
+
+    e.preventDefault();
+
+    const zoomFactor = 1.1;
+    const mouseX = e.offsetX;
+    const mouseY = e.offsetY;
+
+    // Determine zoom direction
+    const newScale = e.deltaY < 0 ? scale * zoomFactor : scale / zoomFactor;
+
+    // Keep image from disappearing
+    if (newScale < 0.1 || newScale > 200) return;
+
+    // Adjust origin so zoom occurs around the mouse pointer
+    originX = mouseX - (mouseX - originX) * (newScale / scale);
+    originY = mouseY - (mouseY - originY) * (newScale / scale);
+
+    scale = newScale;
+    draw();
+});
+
+// Right click to clear points
+canvas.addEventListener("mouseup", e => {
+    if (e.button == 2) {
+        clickPoints = [];
+        draw();
+    }
+});
+
+// Clicking for measuring
+canvas.addEventListener("click", e => {
+    if (!imgLoaded) return;
+
+    if (clickPoints.length === 2) {
+        clickPoints = [];
+    }
+
+    const rect = canvas.getBoundingClientRect();
+    const screenX = e.clientX - rect.left;
+    const screenY = e.clientY - rect.top;
+
+    const pt = screenToImageCoords(screenX, screenY);
+
+    clickPoints.push(pt);
+
+    if (clickPoints.length === 2) {
+        const p1 = clickPoints[0];
+        const p2 = clickPoints[1];
+
+        const W = img.width;
+        const H = img.height;
+
+        const ll1 = pixelToLatLon(p1.x, p1.y, W, H);
+        const ll2 = pixelToLatLon(p2.x, p2.y, W, H);
+
+        const dist = haversine(ll1.lat, ll1.lon, ll2.lat, ll2.lon);
+
+        info.innerHTML = `
+            <b>Point 1:</b> (${p1.x.toFixed(1)}, ${p1.y.toFixed(1)}) → lat ${ll1.lat.toFixed(4)}, lon ${ll1.lon.toFixed(4)}<br>
+            <b>Point 2:</b> (${p2.x.toFixed(1)}, ${p2.y.toFixed(1)}) → lat ${ll2.lat.toFixed(4)}, lon ${ll2.lon.toFixed(4)}<br>
+            <b>Distance:</b> ${dist.toFixed(3)} km
+        `;
+    }
+
+    draw();
+});
+</script>
+
+</body>
+</html>
